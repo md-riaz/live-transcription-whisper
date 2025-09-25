@@ -186,6 +186,51 @@ The following checklist assumes a fresh Debian 12 server with 8 CPU cores and 8&
    sudo systemctl enable --now live-transcription.service
    ```
 
+8. **Optional: Place Nginx in front as a reverse proxy**
+
+   Add Nginx if you want to terminate TLS, serve static assets, or expose the API on ports 80/443 while keeping Gunicorn bound to localhost.
+
+   ```bash
+   sudo apt install -y nginx
+   sudo rm /etc/nginx/sites-enabled/default
+   ```
+
+   Create `/etc/nginx/sites-available/live-transcription` with the following contents:
+
+   ```nginx
+   upstream live_transcription_backend {
+       server 127.0.0.1:8000;
+   }
+
+   server {
+       listen 80;
+       server_name your.domain.example;
+
+       # Increase limits for websocket audio frames.
+       client_max_body_size 50M;
+
+       location / {
+           proxy_pass http://live_transcription_backend;
+           proxy_http_version 1.1;
+           proxy_set_header Upgrade $http_upgrade;
+           proxy_set_header Connection "upgrade";
+           proxy_set_header Host $host;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+       }
+   }
+   ```
+
+   Enable the site and reload Nginx:
+
+   ```bash
+   sudo ln -s /etc/nginx/sites-available/live-transcription /etc/nginx/sites-enabled/
+   sudo nginx -t
+   sudo systemctl reload nginx
+   ```
+
+   For HTTPS, obtain certificates (for example with [Certbot](https://certbot.eff.org/)) and update the `server` block to listen on `443 ssl`.
+
 These steps provide a production-ready deployment tailored to commodity Debian 12 hardware without a discrete GPU. Increase the worker count or switch to a larger Whisper model only after upgrading the memory footprint of the host.
 
 ## Project Structure
