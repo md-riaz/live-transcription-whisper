@@ -1,19 +1,18 @@
 import asyncio
+import logging
 import queue
 import threading
 import time
 import uuid
-import logging
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, NamedTuple
 
 from fastapi import WebSocket
 
 from .service import TranscriptionService
+from config import settings
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 # Audio parameters - must match frontend MediaRecorder settings
 CHANNELS = 1
@@ -21,9 +20,7 @@ SAMPLE_WIDTH = 2  # 16-bit audio
 SAMPLE_RATE = 16000
 
 # Audio storage configuration
-AUDIO_STORAGE_DIR = Path("audio_chunks")
-if not AUDIO_STORAGE_DIR.exists():
-    AUDIO_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+AUDIO_STORAGE_DIR = settings.audio_storage_dir
 
 
 class TranscriptionRequest(NamedTuple):
