@@ -1,17 +1,19 @@
-import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 import logging
+import platform
 import time
 from datetime import datetime
-import platform
+
+import torch
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+
+from config import settings
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 class TranscriptionService:
     def __init__(self):
         self.device, self.torch_dtype = self._setup_device_and_dtype()
-        model_id = "openai/whisper-large-v3-turbo"  # Using the large turbo model
+        model_id = settings.transcription_model_id
 
         try:
             self.model = AutoModelForSpeechSeq2Seq.from_pretrained(

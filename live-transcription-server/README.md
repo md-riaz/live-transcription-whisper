@@ -11,7 +11,7 @@ The **Live Transcription Server** is a backend application built with FastAPI, d
 - **Scalable Architecture**: Utilizes worker threads and asynchronous programming to efficiently manage transcription requests.
 - **Audio Storage**: Saves audio chunks to the filesystem for record-keeping and further processing.
 - **Robust Error Handling**: Implements comprehensive logging and error handling to ensure reliability and ease of debugging.
-- **Configurable Environment**: Easily configurable through environment variables and runtime configurations.
+- **Configurable Environment**: Automatically loads settings from environment variables (including a local `.env` file).
 
 ## Prerequisites
 
@@ -46,9 +46,12 @@ The **Live Transcription Server** is a backend application built with FastAPI, d
    pip install -r requirements.txt
    ```
 
+   The backend automatically loads a `.env` file in this directory via [`python-dotenv`](https://pypi.org/project/python-dotenv/)
+   so you can override configuration without exporting variables manually.
+
 4. **Configure Environment Variables**
 
-   Create a `.env` file in the root directory to set up environment variables if necessary. For example:
+   Create a `.env` file in the root directory to set up environment variables. The server reads these values at startup:
 
    ```env
    # Server Configuration
@@ -56,12 +59,12 @@ The **Live Transcription Server** is a backend application built with FastAPI, d
    HOST=0.0.0.0  # Use 'localhost' for local development only
 
    # Application Configuration
-   TRANSCRIPTION_MODEL_ID=openai/whisper-large-v3-turbo
+   TRANSCRIPTION_MODEL_ID=openai/whisper-medium
    AUDIO_STORAGE_DIR=audio_chunks
    LOG_LEVEL=INFO
    ```
 
-   > **Note:** The default configuration is already set in the code. Adjust the `.env` file if you need to change the default settings.
+   > **Note:** The backend defaults to the `openai/whisper-medium` checkpoint, which fits comfortably in around 8&nbsp;GB of system RAM. Override `TRANSCRIPTION_MODEL_ID` in your `.env` only if you have hardware that can support a larger model.
 
 ## Running the Server
 
@@ -84,31 +87,155 @@ The server will be accessible at `http://localhost:<PORT>` (e.g., `http://localh
 
 ### Production
 
-For production deployment, it's recommended to use a production-ready ASGI server like **Gunicorn** with **Uvicorn** workers.
+For production deployment, it's recommended to use a production-ready ASGI server like **Gunicorn** with **Uvicorn** workers. Adjust the number of workers so that the Whisper checkpoint and its activations comfortably fit in memory.
 
-1. **Install Gunicorn**
+#### Debian 12 (8 cores / 8&nbsp;GB RAM) deployment guide
+
+The following checklist assumes a fresh Debian 12 server with 8 CPU cores and 8&nbsp;GB of RAM.
+
+1. **Install system packages**
 
    ```bash
+   sudo apt update
+   sudo apt install -y python3 python3-venv python3-pip build-essential ffmpeg
+   ```
+
+   `ffmpeg` is required for audio preprocessing by the Transformers pipeline.
+
+2. **Create application directory**
+
+   ```bash
+   sudo mkdir -p /opt/live-transcription
+   sudo chown "$USER":"$USER" /opt/live-transcription
+   cd /opt/live-transcription
+   ```
+
+3. **Clone the repository and set up Python**
+
+   ```bash
+   git clone https://github.com/yourusername/live-transcription-server.git .
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install --upgrade pip
+   pip install -r requirements.txt
    pip install gunicorn
    ```
 
-2. **Run the Server with Gunicorn**
+4. **Create a production `.env`**
 
-   ```bash
-   # Using default port (8000)
-   gunicorn main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --workers 4
-
-   # Using custom port
-   gunicorn main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8080 --workers 4
-
-   # Using environment variables
-   gunicorn main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --workers 4
+   ```env
+   HOST=0.0.0.0
+   PORT=8000
+   TRANSCRIPTION_MODEL_ID=openai/whisper-medium
+   AUDIO_STORAGE_DIR=/opt/live-transcription/audio_chunks
+   LOG_LEVEL=INFO
    ```
 
-   Adjust the number of `--workers` based on your server's CPU cores.
+   With only 8&nbsp;GB of RAM, stick with the medium model and keep Gunicorn workers to 1–2 (see below) to avoid memory pressure.
+
+5. **Prepare storage and permissions**
+
+   ```bash
+   mkdir -p /opt/live-transcription/audio_chunks
+   chmod 750 /opt/live-transcription/audio_chunks
+   ```
+
+6. **Launch Gunicorn with conservative workers**
+
+   ```bash
+   source /opt/live-transcription/.venv/bin/activate
+   cd /opt/live-transcription
+   gunicorn main:app \
+     -k uvicorn.workers.UvicornWorker \
+     --bind "${HOST:-0.0.0.0}:${PORT:-8000}" \
+     --workers 2 \
+     --timeout 120
+   ```
+
+   Two workers balance CPU utilization against the memory footprint of the Whisper medium model. If the server starts swapping, drop to a single worker.
+
+7. **Optional: Create a systemd service**
+
+   ```ini
+   # /etc/systemd/system/live-transcription.service
+   [Unit]
+   Description=Live Transcription Backend
+   After=network.target
+
+   [Service]
+   Type=simple
+   WorkingDirectory=/opt/live-transcription
+   EnvironmentFile=/opt/live-transcription/.env
+   ExecStart=/opt/live-transcription/.venv/bin/gunicorn main:app \
+     -k uvicorn.workers.UvicornWorker \
+     --bind 0.0.0.0:${PORT} \
+     --workers=2 \
+     --timeout=120
+   Restart=always
+   User=www-data
+   Group=www-data
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   Enable and start the service:
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now live-transcription.service
+   ```
+
+8. **Optional: Place Nginx in front as a reverse proxy**
+
+   Add Nginx if you want to terminate TLS, serve static assets, or expose the API on ports 80/443 while keeping Gunicorn bound to localhost.
+
+   ```bash
+   sudo apt install -y nginx
+   sudo rm /etc/nginx/sites-enabled/default
+   ```
+
+   Create `/etc/nginx/sites-available/live-transcription` with the following contents:
+
+   ```nginx
+   upstream live_transcription_backend {
+       server 127.0.0.1:8000;
+   }
+
+   server {
+       listen 80;
+       server_name your.domain.example;
+
+       # Increase limits for websocket audio frames.
+       client_max_body_size 50M;
+
+       location / {
+           proxy_pass http://live_transcription_backend;
+           proxy_http_version 1.1;
+           proxy_set_header Upgrade $http_upgrade;
+           proxy_set_header Connection "upgrade";
+           proxy_set_header Host $host;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+       }
+   }
+   ```
+
+   Enable the site and reload Nginx:
+
+   ```bash
+   sudo ln -s /etc/nginx/sites-available/live-transcription /etc/nginx/sites-enabled/
+   sudo nginx -t
+   sudo systemctl reload nginx
+   ```
+
+   For HTTPS, obtain certificates (for example with [Certbot](https://certbot.eff.org/)) and update the `server` block to listen on `443 ssl`.
+
+These steps provide a production-ready deployment tailored to commodity Debian 12 hardware without a discrete GPU. Increase the worker count or switch to a larger Whisper model only after upgrading the memory footprint of the host.
 
 ## Project Structure
 
+- `config.py`: Centralizes environment-driven configuration and logging defaults.
 - `main.py`: Entry point for the FastAPI application.
 - `real_time_audio/`: Contains modules related to real-time audio processing.
   - `__init__.py`: Initializes the transcription handler.
