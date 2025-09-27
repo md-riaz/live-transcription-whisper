@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from typing import Dict, NamedTuple
+from typing import Dict, NamedTuple, Optional
 
 from fastapi import WebSocket
 
@@ -33,12 +33,17 @@ class TranscriptionRequest(NamedTuple):
 
 class TranscriptionWorker(threading.Thread):
     """Single worker thread that processes all transcription requests sequentially"""
-    def __init__(self, transcription_service: TranscriptionService, loop: asyncio.AbstractEventLoop):
+
+    def __init__(self, transcription_service: TranscriptionService):
         super().__init__()
         self.transcription_service = transcription_service
         self.request_queue = queue.Queue(maxsize=100)
         self.result_queues: Dict[str, asyncio.Queue] = {}
         self.running = True
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Update the event loop used for delivering transcription results."""
         self.loop = loop
 
     def run(self):
@@ -61,15 +66,21 @@ class TranscriptionWorker(threading.Thread):
                     # If session still exists, send result
                     if request.session_id in self.result_queues:
                         result_queue = self.result_queues[request.session_id]
-                        asyncio.run_coroutine_threadsafe(
-                            result_queue.put({
-                                "type": "transcription",
-                                "text": transcription,
-                                "timestamp": request.timestamp,
-                                "audio_file": request.audio_file_path
-                            }),
-                            self.loop
-                        )
+                        if self.loop and not self.loop.is_closed():
+                            asyncio.run_coroutine_threadsafe(
+                                result_queue.put({
+                                    "type": "transcription",
+                                    "text": transcription,
+                                    "timestamp": request.timestamp,
+                                    "audio_file": request.audio_file_path
+                                }),
+                                self.loop,
+                            )
+                        else:
+                            logger.warning(
+                                "No active event loop available for session %s; dropping transcription result.",
+                                request.session_id,
+                            )
                 except Exception as e:
                     logger.error(f"Error processing transcription: {e}")
 
@@ -149,16 +160,9 @@ class TranscriptionHandler:
         self.active_connections: Dict[str, WebSocket] = {}
         self.output_queues: Dict[str, asyncio.Queue] = {}
         
-        try:
-            self.loop = asyncio.get_event_loop()
-            if self.loop.is_closed():
-                self.loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self.loop)
-        except RuntimeError:
-            self.loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self.loop)
-        
-        self.worker = TranscriptionWorker(self.transcription_service, self.loop)
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+
+        self.worker = TranscriptionWorker(self.transcription_service)
         self.worker.start()
 
         # Initialize audio save worker
@@ -174,6 +178,10 @@ class TranscriptionHandler:
 
         session_id = str(uuid.uuid4())
         self.active_connections[session_id] = websocket
+
+        loop = asyncio.get_running_loop()
+        self.loop = loop
+        self.worker.set_loop(loop)
 
         # Initialize output queue and add to worker
         self.output_queues[session_id] = asyncio.Queue(maxsize=100)
@@ -205,8 +213,8 @@ class TranscriptionHandler:
                     # Enqueue the save request
                     self.audio_save_queue.put_nowait((session_id, audio_data, current_timestamp, response_queue))
                     
-                    # Wait for the file path to be saved
-                    audio_file_path = response_queue.get()
+                    # Wait for the file path to be saved without blocking the event loop
+                    audio_file_path = await asyncio.to_thread(response_queue.get)
                     
                     if audio_file_path is None:
                         raise Exception("Failed to save audio chunk.")

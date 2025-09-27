@@ -85,6 +85,114 @@ uvicorn main:app --reload --port $PORT
 
 The server will be accessible at `http://localhost:<PORT>` (e.g., `http://localhost:8000` or your custom port).
 
+#### Quick WebSocket connectivity check (public test)
+
+For quick smoke-testing against a publicly reachable deployment you can open a browser console and initiate a WebSocket
+session directly. The snippet below connects to the sample deployment running at `ws://103.125.255.109/ws/transcribe` and
+logs connection lifecycle events:
+
+```js
+const socket = new WebSocket('ws://103.125.255.109/ws/transcribe');
+
+socket.addEventListener('open', () => {
+  console.log('✅ Connected to live transcription backend');
+  // TODO: send encoded audio chunks once you are ready
+});
+
+socket.addEventListener('message', (event) => {
+  console.log('Transcription update:', event.data);
+});
+
+socket.addEventListener('close', (event) => {
+  console.log('Connection closed', event.code, event.reason);
+});
+
+socket.addEventListener('error', (event) => {
+  console.error('WebSocket error', event);
+});
+```
+
+> **Note:** The backend keeps the socket open until it receives audio data, so the snippet above is only a connectivity
+> smoke test. Keep the socket open and send binary WAV frames (see the next section) to exercise the full pipeline.
+
+#### WebSocket payload contract
+
+The `/ws/transcribe` endpoint expects each message to be a binary frame containing a complete WAV-formatted audio chunk
+that matches the capture parameters used across the project:
+
+- **Sample rate:** 16&nbsp;kHz
+- **Channels:** mono (1)
+- **Sample width:** 16-bit little-endian (PCM)
+
+Each chunk is forwarded to the Whisper pipeline as soon as it is saved, and transcription results are streamed back to the
+client as JSON objects of the form:
+
+```json
+{
+  "type": "transcription",
+  "text": "<recognized text>",
+  "timestamp": 1714059673.123,
+  "audio_file": "/abs/path/to/chunk.wav"
+}
+```
+
+Because the server expects binary frames, make sure to set `socket.binaryType = 'arraybuffer'` before you start sending data
+from the browser. The example below records microphone input with the `MediaRecorder` API, converts each chunk to a WAV blob
+using the agreed 16&nbsp;kHz mono profile, and streams it to the backend:
+
+```js
+const socket = new WebSocket('ws://103.125.255.109/ws/transcribe');
+socket.binaryType = 'arraybuffer';
+
+async function startStreaming() {
+  const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const recorder = new MediaRecorder(mediaStream, {
+    mimeType: 'audio/wav',
+    audioBitsPerSecond: 128000,
+  });
+
+  recorder.addEventListener('dataavailable', async (event) => {
+    if (event.data.size === 0 || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const arrayBuffer = await event.data.arrayBuffer();
+    socket.send(arrayBuffer);
+  });
+
+  recorder.start(1000); // emit a chunk every second
+}
+
+socket.addEventListener('open', () => {
+  console.log('WebSocket connected, starting microphone capture…');
+  startStreaming().catch((error) => console.error('Recorder error', error));
+});
+```
+
+> **Heads-up:** Not every browser can generate `audio/wav` chunks directly. If `MediaRecorder` throws a `NotSupportedError`,
+> fall back to a WAV encoder library (for example [`wavefile`](https://www.npmjs.com/package/wavefile)) to transcode the raw
+> PCM samples emitted by `audio/webm` or `audio/ogg` blobs before calling `socket.send()`.
+
+If you're testing outside of the browser, an equivalent result can be achieved with Python:
+
+```python
+import asyncio
+import websockets
+
+async def send_wav(path: str):
+    async with websockets.connect('ws://103.125.255.109/ws/transcribe') as ws:
+        with open(path, 'rb') as wav_file:
+            await ws.send(wav_file.read())
+        print(await ws.recv())
+
+asyncio.run(send_wav('sample.wav'))
+```
+
+Install the dependency with `pip install websockets` if it is not already available in your environment.
+
+The Python example sends a single WAV file and prints the first transcription update it receives. Replace `sample.wav` with
+any 16&nbsp;kHz mono test clip that follows the same PCM encoding.
+
 ### Production
 
 For production deployment, it's recommended to use a production-ready ASGI server like **Gunicorn** with **Uvicorn** workers. Adjust the number of workers so that the Whisper checkpoint and its activations comfortably fit in memory.
