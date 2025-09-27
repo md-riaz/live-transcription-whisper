@@ -209,7 +209,8 @@ The following checklist assumes a fresh Debian 12 server with 8 CPU cores and 8&
        # Increase limits for websocket audio frames.
        client_max_body_size 50M;
 
-       location / {
+       # Forward WebSocket traffic (e.g., /ws/transcribe) to the FastAPI app.
+       location /ws/ {
            proxy_pass http://live_transcription_backend;
            proxy_http_version 1.1;
            proxy_set_header Upgrade $http_upgrade;
@@ -218,8 +219,18 @@ The following checklist assumes a fresh Debian 12 server with 8 CPU cores and 8&
            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
            proxy_set_header X-Forwarded-Proto $scheme;
        }
+
+       # Forward any additional HTTP endpoints you expose.
+       location / {
+           proxy_pass http://live_transcription_backend;
+           proxy_set_header Host $host;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+       }
    }
    ```
+
+   With this configuration, the WebSocket client continues to connect to `ws(s)://your.domain.example/ws/transcribe`, matching the backend route documented in the [Usage](#usage) section.
 
    Enable the site and reload Nginx:
 
