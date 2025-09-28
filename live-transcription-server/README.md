@@ -265,26 +265,36 @@ The following checklist assumes a fresh Debian 12 server with 8 CPU cores and 8&
 7. **Optional: Create a systemd service**
 
    ```ini
-   # /etc/systemd/system/live-transcription.service
-   [Unit]
-   Description=Live Transcription Backend
-   After=network.target
+# /etc/systemd/system/live-transcription.service
+[Unit]
+Description=Live Transcription Backend
+After=network-online.target
+Wants=network-online.target
 
-   [Service]
-   Type=simple
-   WorkingDirectory=/opt/live-transcription
-   EnvironmentFile=/opt/live-transcription/.env
-   ExecStart=/opt/live-transcription/.venv/bin/gunicorn main:app \
-     -k uvicorn.workers.UvicornWorker \
-     --bind 0.0.0.0:${PORT} \
-     --workers=2 \
-     --timeout=120
-   Restart=always
-   User=www-data
-   Group=www-data
+[Service]
+Type=simple
+WorkingDirectory=/opt/live-transcription
+EnvironmentFile=/opt/live-transcription/.env
 
-   [Install]
-   WantedBy=multi-user.target
+# Caches writable for www-data to avoid HF download crashes
+Environment=HF_HOME=/var/cache/huggingface
+Environment=TRANSFORMERS_CACHE=/var/cache/huggingface
+
+# Hardcode bind just to validate the stack
+ExecStart=/opt/live-transcription/.venv/bin/gunicorn --chdir /opt/live-transcription \
+  -k uvicorn.workers.UvicornWorker \
+  --bind 0.0.0.0:8000 \
+  --workers 2 \
+  --timeout 120 \
+  main:app
+
+User=www-data
+Group=www-data
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
    ```
 
    Enable and start the service:
